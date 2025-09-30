@@ -60,10 +60,15 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install coverage pytest pip-audit
 
+      # ⚠️ Rosemary (editable) SOLO en 3.12 porque requiere Python >=3.12
       - name: Install project dependencies
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e .; fi
+          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+            if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e .; fi
+          else
+            echo "Saltando 'pip install -e .' (rosemary requiere Python >= 3.12)"
+          fi
 
       # (1) Verificar dependencias desactualizadas (no falla el job; pon FAIL_ON_OUTDATED=true si quieres que falle)
       - name: Check outdated dependencies
@@ -81,8 +86,7 @@ jobs:
             fi
           fi
 
-      # (3) Análisis de seguridad con pip-audit
-      # Usa --strict para fallar con CVEs; aquí dejamos informe y no fallamos (cámbialo si tu política exige fallo).
+      # (3) Análisis de seguridad con pip-audit (deja informe y no corta; usa --strict si quieres que falle)
       - name: Security audit (pip-audit)
         run: |
           if [ -f requirements.txt ]; then

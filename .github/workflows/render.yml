@@ -1,24 +1,89 @@
 name: Deploy to Render
 
 on:
-    push:
-      branches:
-        - main
-    pull_request:
-      branches:
-        - main
+  push:
+    tags:
+      - "v*"            # dispara SOLO cuando creas/push un tag que empiece por v
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
 
 jobs:
-
   deploy:
-    name: Deploy to Render
+    name: Deploy to Render (only on tagged, tested, merged PR)
     runs-on: ubuntu-latest
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@v4
 
+    steps:
+      - name: Checkout (shallow ok)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # necesitamos refs/tags para resolver el commit
+
+      # 1) Verificar que el tag apunta a un commit que está en main
+      - name: Ensure tag commit is reachable from main
+        id: on_main
+        run: |
+          TAG_SHA="${GITHUB_SHA}"
+          git fetch origin main --depth=1
+          if git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Tag fuera de main::El commit etiquetado no está en main."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # 2) Verificar que el commit etiquetado proviene de un PR MERGEADO hacia main
+      - name: Ensure commit has a merged PR into main
+        id: pr_check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = process.env.GITHUB_SHA;
+            // PRs asociados al commit
+            const prs = await github.request('GET /repos/{owner}/{repo}/commits/{ref}/pulls', {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: sha,
+              headers: { accept: 'application/vnd.github.groot-preview+json' }
+            });
+            const merged = prs.data.find(pr =>
+              pr.base?.ref === 'main' && pr.merged_at && pr.state === 'closed' && pr.merge_commit_sha
+            );
+            core.setOutput('ok', merged ? 'true' : 'false');
+            if (!merged) {
+              core.setFailed('No hay PR mergeado a main asociado a este commit/tag.');
+            }
+
+      # 3) Verificar que TODOS los checks (CI) del commit han pasado
+      - name: Ensure all checks succeeded for this commit
+        id: ci_check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = process.env.GITHUB_SHA;
+            // Comprueba check-runs (Actions y otras apps) del commit
+            const { data } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: sha
+            });
+            if (!data.check_runs.length) {
+              core.setFailed('No hay check-runs en este commit. Asegura que tu CI se ejecuta en PR/main.');
+            }
+            const failing = data.check_runs.filter(cr => cr.conclusion !== 'success');
+            if (failing.length) {
+              core.setFailed(`Hay checks fallidos o pendientes: ${failing.map(f=>f.name+':'+f.conclusion).join(', ')}`);
+            } else {
+              core.setOutput('ok', 'true');
+            }
+
+      # 4) Desplegar a Render solo si pasó todo
       - name: Deploy to Render
+        if: steps.on_main.outputs.ok == 'true' && steps.pr_check.outputs.ok == 'true' && steps.ci_check.outputs.ok == 'true'
         env:
           deploy_url: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
-          curl "$deploy_url"
+          curl -fsSL "$deploy_url"
